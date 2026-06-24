@@ -7,6 +7,12 @@ import anthropic
 import ssl
 import certifi
 
+print("Starting RecapBot...")
+print(f"SLACK_BOT_TOKEN exists: {'SLACK_BOT_TOKEN' in os.environ}")
+print(f"SLACK_SIGNING_SECRET exists: {'SLACK_SIGNING_SECRET' in os.environ}")
+print(f"SLACK_APP_TOKEN exists: {'SLACK_APP_TOKEN' in os.environ}")
+print(f"ANTHROPIC_API_KEY exists: {'ANTHROPIC_API_KEY' in os.environ}")
+
 # Fix SSL certificates
 ssl._create_default_https_context = ssl.create_default_context
 os.environ['SSL_CERT_FILE'] = certifi.where()
