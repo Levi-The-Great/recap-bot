@@ -2,13 +2,46 @@ import os
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+import anthropic
 
-load_dotenv()
+load_dotenv() #get info from the .env file
 
 app = App(
-    token=os.environ["SLACK_BOT_TOKEN"],
+    token=os.environ["SLACK_BOT_TOKEN"], #refering to .env
     signing_secret=os.environ["SLACK_SIGNING_SECRET"]
 )
+
+claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+
+def summarize_thread(messages):
+    # Format messages as readable text
+    formatted = "\n".join([
+        f"- {msg.get('text', '')}"
+        for msg in messages
+        if msg.get('text') and not msg['text'].startswith('<@')  # skip bot mentions
+    ])
+
+    # Send to Claude
+    response = claude.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1000,
+        messages=[{
+            "role": "user",
+            "content": f"""Summarize this Slack thread concisely. Include:
+- Main topic being discussed
+- Key decisions made
+- Open questions or unresolved items  
+- Action items and who owns them (if mentioned)
+
+Keep it to 5-10 bullet points max. Be concise and clear.
+
+Thread messages:
+{formatted}"""
+        }]
+    )
+
+    return response.content[0].text
 
 
 @app.event("app_mention")
@@ -16,23 +49,43 @@ def handle_mention(event, client, say):
     channel_id = event["channel"]
     thread_ts = event.get("thread_ts") or event["ts"]
 
-    # Fetch all messages in the thread
-    result = client.conversations_replies(
-        channel=channel_id,
-        ts=thread_ts
-    )
-    messages = result["messages"]
-
-    # Print to console for now
-    print(f"Found {len(messages)} messages in thread:")
-    for msg in messages:
-        print(f"  - {msg.get('text', '')}")
-
-    # Reply in the thread
+    # Let user know we're working on it
     say(
-        text=f"Found {len(messages)} messages in this thread. Summarization coming soon!",
+        text="⏳ Summarizing thread...",
         thread_ts=thread_ts
     )
+
+    try:
+        # Fetch all messages in the thread
+        result = client.conversations_replies(
+            channel=channel_id,
+            ts=thread_ts
+        )
+        messages = result["messages"]
+
+        # Need at least 2 real messages to summarize
+        if len(messages) < 2:
+            say(
+                text="This thread is too short to summarize!",
+                thread_ts=thread_ts
+            )
+            return
+
+        # Get summary from Claude
+        summary = summarize_thread(messages)
+
+        # Post summary back
+        say(
+            text=f"📝 *Thread Summary*\n\n{summary}",
+            thread_ts=thread_ts
+        )
+
+    except Exception as e:
+        print(f"Error: {e}")
+        say(
+            text="Sorry, something went wrong. Please try again!",
+            thread_ts=thread_ts
+        )
 
 
 if __name__ == "__main__":
