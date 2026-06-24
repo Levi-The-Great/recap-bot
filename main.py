@@ -4,6 +4,12 @@ from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import anthropic
+import ssl
+import certifi
+
+# Fix SSL certificates
+ssl._create_default_https_context = ssl.create_default_context
+os.environ['SSL_CERT_FILE'] = certifi.where()
 
 load_dotenv()
 
