@@ -1,46 +1,151 @@
 import os
+import json
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import anthropic
 
-load_dotenv() #get info from the .env file
+load_dotenv()
 
 app = App(
-    token=os.environ["SLACK_BOT_TOKEN"], #refering to .env
+    token=os.environ["SLACK_BOT_TOKEN"],
     signing_secret=os.environ["SLACK_SIGNING_SECRET"]
 )
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 
+def build_blocks(summary):
+    def bullet_list(items):
+        if not items:
+            return [{
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": "None"}]
+            }]
+        return [
+            {
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": item}]
+            }
+            for item in items
+        ]
+
+    return [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Thread Summary", "emoji": False}
+        },
+        {"type": "divider"},
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "What's this about", "style": {"bold": True}}]
+                },
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{"type": "text", "text": summary["about"]}]
+                }
+            ]
+        },
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "Decisions made", "style": {"bold": True}}]
+                },
+                {
+                    "type": "rich_text_list",
+                    "style": "bullet",
+                    "elements": bullet_list(summary["decisions"])
+                }
+            ]
+        },
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "Open questions", "style": {"bold": True}}]
+                },
+                {
+                    "type": "rich_text_list",
+                    "style": "bullet",
+                    "elements": bullet_list(summary["questions"])
+                }
+            ]
+        },
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "Action items", "style": {"bold": True}}]
+                },
+                {
+                    "type": "rich_text_list",
+                    "style": "bullet",
+                    "elements": bullet_list(summary["actions"])
+                }
+            ]
+        },
+        {"type": "divider"},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Regenerate", "emoji": False},
+                    "action_id": "regenerate_summary"
+                }
+            ]
+        }
+    ]
+
 def summarize_thread(messages):
-    # Format messages as readable text
+    # Cap at 50 messages to avoid huge prompts
+    capped = messages[:50]
+    was_capped = len(messages) > 50
+
     formatted = "\n".join([
         f"- {msg.get('text', '')}"
-        for msg in messages
-        if msg.get('text') and not msg['text'].startswith('<@')  # skip bot mentions
+        for msg in capped
+        if msg.get('text') and not msg['text'].startswith('<@')
     ])
 
-    # Send to Claude
+    # Check if there's actually any content after filtering
+    if not formatted.strip():
+        raise ValueError("empty_thread")
+
     response = claude.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1000,
         messages=[{
             "role": "user",
-            "content": f"""Summarize this thread using bullet points. Make sure to include: 
-                1. TL;DR: A 1-2 sentence bottom-line up front.Context/Problem: 
-                2. The core issue or question being discussed.Key Arguments/Points: 
-                3. Bulleted highlights of the main perspectives.
-                4. Decisions Made: A clear record of what was agreed upon.
-                5. Action Items: Specific tasks assigned to individuals, complete with deadlines.
+            "content": f"""Summarize this Slack thread. Reply ONLY with a JSON object, no other text, no backticks.
 
-Thread messages:
+Use this exact structure:
+{{
+    "about": "one sentence about what this thread is about",
+    "decisions": ["decision 1", "decision 2"],
+    "questions": ["open question 1"],
+    "actions": ["Person: task (deadline)"]
+}}
+
+If a section has nothing, use an empty array [].
+
+Thread:
 {formatted}"""
         }]
     )
 
-    return response.content[0].text
+    raw = response.content[0].text
+    clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    result = json.loads(clean)
+    result["was_capped"] = was_capped
+    return result
 
 
 @app.event("app_mention")
@@ -48,43 +153,94 @@ def handle_mention(event, client, say):
     channel_id = event["channel"]
     thread_ts = event.get("thread_ts") or event["ts"]
 
-    # Let user know we're working on it
-    say(
-        text="⏳ Summarizing thread...",
-        thread_ts=thread_ts
-    )
+    say(text="Summarizing thread...", thread_ts=thread_ts)
 
     try:
-        # Fetch all messages in the thread
+        # Fetch thread messages
         result = client.conversations_replies(
             channel=channel_id,
             ts=thread_ts
         )
         messages = result["messages"]
 
-        # Need at least 2 real messages to summarize
-        if len(messages) < 2:
+        # Filter out bot mentions to count real messages
+        real_messages = [
+            m for m in messages
+            if m.get('text') and not m['text'].startswith('<@')
+        ]
+
+        # Too short or empty
+        if len(real_messages) < 2:
             say(
-                text="This thread is too short to summarize!",
+                text="This thread is too short to summarize. Add more messages and try again!",
                 thread_ts=thread_ts
             )
             return
 
-        # Get summary from Claude
+        # Summarize
         summary = summarize_thread(messages)
+        blocks = build_blocks(summary)
 
-        # Post summary back
+        # Add a note if thread was capped
+        if summary.get("was_capped"):
+            blocks.insert(1, {
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": "Note: This thread is long — summarized the first 50 messages only."
+                }]
+            })
+
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            blocks=blocks,
+            text="Thread Summary"
+        )
+
+    except ValueError as e:
+        if str(e) == "empty_thread":
+            say(
+                text="This thread doesn't have any real messages to summarize!",
+                thread_ts=thread_ts
+            )
+    except json.JSONDecodeError:
         say(
-            text=f"📝 *Thread Summary*\n\n{summary}",
+            text="Something went wrong reading the summary. Please try again!",
             thread_ts=thread_ts
+        )
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        say(
+            text="Something went wrong. Please try again in a moment!",
+            thread_ts=thread_ts
+        )
+
+
+@app.action("regenerate_summary")
+def handle_regenerate(ack, body, client):
+    ack()
+    channel_id = body["channel"]["id"]
+    thread_ts = body["message"]["thread_ts"]
+
+    try:
+        result = client.conversations_replies(
+            channel=channel_id,
+            ts=thread_ts
+        )
+        messages = result["messages"]
+        summary = summarize_thread(messages)
+        blocks = build_blocks(summary)
+
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            blocks=blocks,
+            text="Thread Summary"
         )
 
     except Exception as e:
         print(f"Error: {e}")
-        say(
-            text="Sorry, something went wrong. Please try again!",
-            thread_ts=thread_ts
-        )
 
 
 if __name__ == "__main__":
