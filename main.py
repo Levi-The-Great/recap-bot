@@ -28,13 +28,12 @@ def summarize_thread(messages):
         max_tokens=1000,
         messages=[{
             "role": "user",
-            "content": f"""Summarize this Slack thread concisely. Include:
-- Main topic being discussed
-- Key decisions made
-- Open questions or unresolved items  
-- Action items and who owns them (if mentioned)
-
-Keep it to 5-10 bullet points max. Be concise and clear.
+            "content": f"""Summarize this thread using bullet points. Make sure to include: 
+                1. TL;DR: A 1-2 sentence bottom-line up front.Context/Problem: 
+                2. The core issue or question being discussed.Key Arguments/Points: 
+                3. Bulleted highlights of the main perspectives.
+                4. Decisions Made: A clear record of what was agreed upon.
+                5. Action Items: Specific tasks assigned to individuals, complete with deadlines.
 
 Thread messages:
 {formatted}"""
